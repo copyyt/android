@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Window colours shown before Compose draws, so launch has no white flash in dark mode. -->
+    <style name="Theme.Copyyt" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/copyyt_mist</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:colorAccent">@color/copyyt_blue</item>
+    </style>
+</resources>

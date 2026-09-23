@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Copyyt</string>
+    <string name="share_label">Copyyt</string>
+    <string name="tile_label">Send clipboard</string>
+</resources>
