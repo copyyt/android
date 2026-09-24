@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Copyyt palette, shared with the Chrome extension. -->
+<!-- Brand blue and Android window colors. -->
 <resources>
     <color name="copyyt_blue">#FF2D9CDB</color>
     <color name="copyyt_navy">#FF0F3449</color>
-    <color name="copyyt_mist">#FFF8FAFC</color>
+    <color name="copyyt_paper">#FFF7F5F1</color>
+    <color name="copyyt_icon_background">#FFFFFFFF</color>
 </resources>

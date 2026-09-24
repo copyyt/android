@@ -18,7 +18,7 @@ fun endpoint(key: String, fallback: String): String =
     (localProperties.getProperty(key) ?: fallback).trimEnd('/')
 
 android {
-    namespace = "com.psami.copyyt"
+    namespace = "com.copyyt.android"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -26,7 +26,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.psami.copyyt"
+        applicationId = "com.copyyt.android"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
@@ -35,7 +35,7 @@ android {
         buildConfigField(
             "String",
             "API_URL",
-            "\"${endpoint("copyyt.apiUrl", "https://api.copyyt.psami.com")}\"",
+            "\"${endpoint("copyyt.apiUrl", "https://api.copyyt.com")}\"",
         )
         // The OAuth *web* client ID the backend accepts as the ID-token audience
         // (GOOGLE_WEB_CLIENT_ID). Empty hides "Continue with Google".
@@ -47,7 +47,7 @@ android {
         buildConfigField(
             "String",
             "SOCKET_URL",
-            "\"${endpoint("copyyt.socketUrl", "https://api.copyyt.psami.com")}\"",
+            "\"${endpoint("copyyt.socketUrl", "https://api.copyyt.com")}\"",
         )
     }
 

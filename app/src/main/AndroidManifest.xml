@@ -7,7 +7,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
-        android:name=".android.CopyytApp"
+        android:name=".app.CopyytApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -17,7 +17,7 @@
         android:usesCleartextTraffic="${usesCleartextTraffic}">
 
         <activity
-            android:name=".android.MainActivity"
+            android:name=".app.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">
@@ -28,7 +28,7 @@
         </activity>
 
         <activity
-            android:name=".android.ShareActivity"
+            android:name=".app.ShareActivity"
             android:exported="true"
             android:excludeFromRecents="true"
             android:label="@string/share_label"
@@ -42,7 +42,7 @@
         </activity>
 
         <activity
-            android:name=".android.ClipboardSendActivity"
+            android:name=".app.ClipboardSendActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:noHistory="true"
@@ -50,7 +50,7 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <service
-            android:name=".android.SyncService"
+            android:name=".app.SyncService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
@@ -59,7 +59,7 @@
         </service>
 
         <service
-            android:name=".android.SendTileService"
+            android:name=".app.SendTileService"
             android:exported="true"
             android:icon="@drawable/ic_copyyt"
             android:label="@string/tile_label"
