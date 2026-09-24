@@ -68,6 +68,8 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.copyyt.android.R
+import com.copyyt.android.app.ClipboardRead
+import com.copyyt.android.app.PreparedClip
 import com.copyyt.android.sync.PeerInfo
 import com.copyyt.android.sync.PendingApproval
 import com.copyyt.android.sync.SyncEngine
@@ -78,7 +80,8 @@ import kotlinx.coroutines.withContext
 
 /** Side effects the screens need from the activity. */
 class ScreenActions(
-    val readClipboard: () -> String?,
+    val readClipboard: () -> ClipboardRead?,
+    val prepareClip: suspend (ClipboardRead) -> PreparedClip,
     val googleSignInAvailable: Boolean,
     val googleIdToken: suspend () -> String?,
     val copySensitive: (label: String, text: String) -> Unit,
@@ -259,6 +262,16 @@ private fun Fingerprint(value: String) {
 
 @Composable
 private fun SignOutLink(engine: SyncEngine) {
+    val account by engine.account.collectAsState()
+    account?.let {
+        Text(
+            "Signed in as ${it.email}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
     TextButton(onClick = { engine.signOut() }, modifier = Modifier.fillMaxWidth()) { Text("Sign out") }
 }
 
@@ -567,18 +580,19 @@ private fun HomeTab(engine: SyncEngine, state: SyncState.Ready, actions: ScreenA
         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
         Spacer(Modifier.height(6.dp))
         Text("Send to your devices", style = MaterialTheme.typography.titleMedium)
-        Hint("Android only lets apps read the clipboard while they're open, so sending is a tap away.")
+        Hint("Send copied text or an image. Android only lets apps read the clipboard while they're open, so sending is a tap away.")
         Button(
             onClick = {
-                val text = actions.readClipboard()
-                if (text.isNullOrEmpty()) {
-                    actions.toast("Your clipboard has no text")
+                val read = actions.readClipboard()
+                if (read == null) {
+                    actions.toast("Your clipboard is empty")
                     return@Button
                 }
                 sending = true
                 run {
-                    val count = engine.sendText(text)
-                    actions.toast("Sent to $count device(s)")
+                    val prepared = actions.prepareClip(read)
+                    val count = engine.sendClip(prepared.content)
+                    actions.toast("Sent to $count device(s)" + if (prepared.resized) " (image resized to send)" else "")
                     sending = false
                 }
             },
@@ -713,6 +727,17 @@ private fun ApprovalCard(engine: SyncEngine, approval: PendingApproval) {
 @Composable
 private fun AccountTab(engine: SyncEngine, state: SyncState.Ready, actions: ScreenActions) {
     Header("Account")
+    val account by engine.account.collectAsState()
+    account?.let {
+        SectionCard {
+            Text(it.name?.takeIf(String::isNotBlank) ?: it.email, style = MaterialTheme.typography.titleMedium)
+            if (!it.name.isNullOrBlank()) Hint(it.email)
+            Hint(
+                "This phone is ${if (state.isRoot) "your account root" else "a paired device"}. " +
+                    "Clipboard content is end-to-end encrypted; the server never sees it.",
+            )
+        }
+    }
     if (state.rootMissing) {
         Text("Your account root was removed", style = MaterialTheme.typography.titleMedium)
         RecoveryInput(engine, "Make this phone the root")

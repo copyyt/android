@@ -2,8 +2,8 @@ package com.copyyt.android.app
 
 import android.annotation.SuppressLint
 import android.app.PendingIntent
-import android.content.ClipboardManager
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.service.quicksettings.TileService
@@ -14,33 +14,53 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** Sends text and finishes; shared by the share sheet and the tile trampoline. */
-private fun ComponentActivity.sendAndFinish(text: String?) {
-    if (text.isNullOrEmpty()) {
-        Toast.makeText(this, "No text to send", Toast.LENGTH_SHORT).show()
+/** Sends text or an image and finishes; shared by the share sheet and the tile trampoline. */
+private fun ComponentActivity.sendAndFinish(read: ClipboardRead?) {
+    if (read == null) {
+        Toast.makeText(this, "Nothing to send", Toast.LENGTH_SHORT).show()
         finish()
         return
     }
     SyncService.start(this)
     val engine = CopyytApp.engine(this)
     lifecycleScope.launch {
-        val result = runCatching { withContext(Dispatchers.IO) { engine.sendText(text) } }
+        val result = runCatching {
+            withContext(Dispatchers.IO) {
+                val prepared = read.prepare(contentResolver)
+                engine.sendClip(prepared.content) to prepared.resized
+            }
+        }
         Toast.makeText(
             this@sendAndFinish,
-            result.fold({ "Copyyt: sent to $it device(s)" }, { "Copyyt: ${it.message ?: "send failed"}" }),
+            result.fold(
+                { (count, resized) -> "Copyyt: sent to $count device(s)" + if (resized) " (image resized to send)" else "" },
+                { "Copyyt: ${it.message ?: "send failed"}" },
+            ),
             Toast.LENGTH_SHORT,
         ).show()
         finish()
     }
 }
 
-/** Share → Copyyt for any shared text. */
+/** Share → Copyyt for shared text or an image. */
 class ShareActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val text = intent?.takeIf { it.action == Intent.ACTION_SEND }
-            ?.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
-        sendAndFinish(text)
+        val share = intent?.takeIf { it.action == Intent.ACTION_SEND }
+        val image = share?.takeIf { it.type?.startsWith("image/") == true }?.let {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                it.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                it.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+            }
+        }
+        val read = when {
+            image != null -> ClipboardRead.Image(image)
+            else -> share?.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()?.takeIf { it.isNotEmpty() }
+                ?.let { ClipboardRead.Text(it, share.getStringExtra(Intent.EXTRA_HTML_TEXT)) }
+        }
+        sendAndFinish(read)
     }
 }
 
@@ -55,12 +75,7 @@ class ClipboardSendActivity : ComponentActivity() {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus || sent) return
         sent = true
-        val text = getSystemService(ClipboardManager::class.java).primaryClip
-            ?.takeIf { it.itemCount > 0 }
-            ?.getItemAt(0)
-            ?.coerceToText(this)
-            ?.toString()
-        sendAndFinish(text)
+        sendAndFinish(ClipImages.readClipboard(this))
     }
 }
 

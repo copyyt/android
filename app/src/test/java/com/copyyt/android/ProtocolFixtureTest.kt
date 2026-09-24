@@ -1,5 +1,7 @@
 package com.copyyt.android
 
+import com.copyyt.android.sync.ClipboardBundle
+import com.copyyt.android.sync.ClipContent
 import com.copyyt.android.crypto.CopyytCrypto
 import com.copyyt.android.crypto.CryptoProtocolException
 import com.copyyt.android.crypto.DeviceKeys
@@ -54,8 +56,8 @@ class ProtocolFixtureTest {
         userId, androidId, 1, androidKeys.signingPublicKeyBase64, androidKeys.encryptionPublicKeyBase64,
     )
 
-    private fun envelope(): Envelope {
-        val e = fixture["envelope"]!!.jsonObject
+    private fun envelope(name: String = "envelope"): Envelope {
+        val e = fixture[name]!!.jsonObject
         return Envelope(
             itemId = str(e, "itemId"),
             sourceDeviceId = str(e, "sourceDeviceId"),
@@ -215,7 +217,11 @@ class ProtocolFixtureTest {
         // Round-trips through the Kotlin decrypt path as the recipient.
         val roundTrip = CopyytCrypto.decrypt(userId, chromeId, 1, chromeKeys, androidPeer, envelope)
         assertEquals("from android ✅", roundTrip.toString(Charsets.UTF_8))
-        val out = File("build/android-envelope.json")
+        writeEnvelope("build/android-envelope.json", envelope)
+    }
+
+    private fun writeEnvelope(path: String, envelope: Envelope) {
+        val out = File(path)
         out.parentFile?.mkdirs()
         out.writeText(
             Json.encodeToString(
@@ -246,6 +252,31 @@ class ProtocolFixtureTest {
                 },
             ),
         )
+    }
+
+    /** The extension's image bundle decrypts and decodes on Android. */
+    @Test
+    fun decodesAnImageBundleFromTheExtension() {
+        val plaintext = CopyytCrypto.decrypt(userId, androidId, 1, androidKeys, chromePeer, envelope("bundleEnvelope"))
+        val content = ClipboardBundle.decode(plaintext)
+        val expected = fixture["bundlePayload"]!!.jsonObject["representations"]!!.jsonArray.associate {
+            str(it.jsonObject, "mime") to str(it.jsonObject, "data")
+        }
+        assertEquals(expected["text/plain"], content.text)
+        assertEquals(expected["text/html"], content.html)
+        assertEquals(expected["image/png"], com.copyyt.android.protocol.B64.encode(content.png!!))
+    }
+
+    /** Writes an Android image bundle for `tools/protocol-fixture.ts verify`. */
+    @Test
+    fun encryptsAnImageBundleForTheExtension() {
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 4, 5, 6)
+        val envelope = CopyytCrypto.encryptText(
+            userId, androidId, 1, androidKeys,
+            ClipboardBundle.encode(ClipContent("from android ✅", "<i>from android</i>", png)), ClipboardBundle.MIME,
+            "2026-09-23T12:00:00Z", listOf(chromePeer),
+        )
+        writeEnvelope("build/android-bundle-envelope.json", envelope)
     }
 
     private fun assertThrows(block: () -> Unit) {

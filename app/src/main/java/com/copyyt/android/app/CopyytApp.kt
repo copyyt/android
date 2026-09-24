@@ -4,7 +4,6 @@ import android.Manifest
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
@@ -17,6 +16,7 @@ import com.copyyt.android.net.CopyytApi
 import com.copyyt.android.store.IdentityStore
 import com.copyyt.android.store.ProcessedItems
 import com.copyyt.android.store.SessionStore
+import com.copyyt.android.sync.ClipContent
 import com.copyyt.android.sync.SyncEngine
 import com.copyyt.android.sync.SyncPlatform
 import com.copyyt.android.trust.TrustStore
@@ -54,7 +54,7 @@ class CopyytApp : Application() {
         )
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_RECEIVED, "Received clipboard", NotificationManager.IMPORTANCE_DEFAULT)
-                .apply { description = "Shown when text from another device is copied" },
+                .apply { description = "Shown when text or an image from another device is copied" },
         )
     }
 
@@ -74,19 +74,21 @@ private class AndroidPlatform(private val context: Context) : SyncPlatform {
 
     override fun now(): Instant = Instant.now()
 
-    override fun writeClipboard(text: String) {
+    override fun writeClipboard(content: ClipContent) {
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         // Android 10+ restricts clipboard *reads* to the focused app; writes
         // from the foreground sync service are permitted.
-        clipboard.setPrimaryClip(ClipData.newPlainText("Copyyt", text))
+        clipboard.setPrimaryClip(ClipImages.clipFor(context, content))
     }
 
-    override fun notifyReceived(sourceName: String, charCount: Int) {
-        // Content is never placed in the notification: only its origin and size.
+    override fun notifyReceived(sourceName: String, content: ClipContent) {
+        // Content is never placed in the notification: only its origin and kind.
+        val detail = if (content.png != null) "An image is on your clipboard"
+        else "${content.text.orEmpty().length} characters are on your clipboard"
         val notification = NotificationCompat.Builder(context, CopyytApp.CHANNEL_RECEIVED)
             .setSmallIcon(R.drawable.ic_copyyt)
             .setContentTitle("Copied from $sourceName")
-            .setContentText("$charCount characters are on your clipboard")
+            .setContentText(detail)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setAutoCancel(true)
             .build()

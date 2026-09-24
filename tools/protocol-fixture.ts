@@ -27,6 +27,11 @@ import {
   buildSocketAuthMessage,
 } from "../../extension/src/crypto/protocol.ts";
 import { createDeviceIdentityForTesting } from "../../extension/src/crypto/key-store.ts";
+import {
+  CLIPBOARD_BUNDLE_V1_MIME,
+  decodeClipboardBundleV1,
+  encodeClipboardBundleV1,
+} from "../../extension/src/clipboard/payload.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixturePath = join(here, "../app/src/test/resources/protocol-fixture.json");
@@ -88,6 +93,27 @@ async function generate() {
       encryptionPublicKey: androidKeys.encryption.x, trustState: "verified",
     }],
   });
+  // An image bundle as the extension sends it to an image-capable device.
+  const bundlePayload = {
+    version: 1 as const,
+    representations: [
+      { mime: "text/plain" as const, encoding: "utf-8" as const, data: "caption 👋" },
+      { mime: "text/html" as const, encoding: "utf-8" as const, data: "<b>caption</b> 👋" },
+      { mime: "image/png" as const, encoding: "base64" as const, data: "iVBORw0KGgoBAgM=" },
+    ],
+  };
+  const bundleEnvelope = await encryptClipboardItem({
+    userId,
+    identity: chrome,
+    plaintext: encodeClipboardBundleV1(bundlePayload),
+    contentType: CLIPBOARD_BUNDLE_V1_MIME,
+    expiresAt,
+    itemId: "33333333-3333-4333-8333-333333333333",
+    recipients: [{
+      userId, deviceId: androidId, keyVersion: 1,
+      encryptionPublicKey: androidKeys.encryption.x, trustState: "verified",
+    }],
+  });
   const approvalSignature = await signDeviceApproval({
     userId,
     approvingIdentity: chrome,
@@ -129,6 +155,8 @@ async function generate() {
   const fixture = {
     userId, chromeId, androidId, chromeKeys, androidKeys, expiresAt, plaintext,
     envelope,
+    bundlePayload,
+    bundleEnvelope,
     approvalSignature,
     fingerprint: await pairingFingerprint(fingerprintInput),
     canonical: {
@@ -180,6 +208,12 @@ async function verify(file: string) {
       signingPublicKey: fixture.androidKeys.signing.x, trustState: "verified",
     },
   });
+  if (envelope.contentType === CLIPBOARD_BUNDLE_V1_MIME) {
+    const bytes = typeof plaintext === "string" ? new TextEncoder().encode(plaintext) : plaintext;
+    const payload = decodeClipboardBundleV1(bytes);
+    console.log(`extension decoded Android bundle: ${JSON.stringify(payload.representations.map((r) => r.mime))}`);
+    return;
+  }
   console.log(`extension decrypted Android envelope: ${JSON.stringify(plaintext)}`);
 }
 

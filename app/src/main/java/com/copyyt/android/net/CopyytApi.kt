@@ -25,6 +25,12 @@ data class UserDto(
 data class ProfileResponse(val user: UserDto)
 
 @Serializable
+data class PlanLimitsDto(val images: Boolean = true, val directTransfer: Boolean = true, val maxDevices: Int? = null)
+
+@Serializable
+data class PlanDto(val plan: String, val limits: PlanLimitsDto)
+
+@Serializable
 data class SignInResponse(
     val accessToken: String,
     val refreshToken: String? = null,
@@ -151,6 +157,8 @@ interface BackendApi {
     fun requestAccountDeletionCode(token: String)
     fun deleteAccount(token: String, code: Int)
     fun updateProfile(token: String, name: String): UserDto
+    /** Null when the server has no plans yet; limits are enforced either way. */
+    fun getPlan(token: String): PlanDto?
 }
 
 /** Thin REST client. Every request identifies as the native Android client. */
@@ -284,6 +292,12 @@ class CopyytApi(
 
     override fun deleteAccount(token: String, code: Int) {
         call<Unit>("POST", "/auth/account-delete", json("code" to code), token, null)
+    }
+
+    override fun getPlan(token: String): PlanDto? = try {
+        call("GET", "/account/plan", null, token, PlanDto.serializer())
+    } catch (error: ApiException) {
+        if (error.status == 404) null else throw error
     }
 
     override fun updateProfile(token: String, name: String): UserDto =

@@ -28,7 +28,12 @@ import com.copyyt.android.store.Session
 import com.copyyt.android.store.SessionStore
 import com.copyyt.android.sync.SocketConnection
 import com.copyyt.android.sync.SocketListener
+import com.copyyt.android.sync.AccountInfo
 import com.copyyt.android.sync.SyncEngine
+import com.copyyt.android.net.PlanLimitsDto
+import com.copyyt.android.net.PlanDto
+import com.copyyt.android.sync.ClipboardBundle
+import com.copyyt.android.sync.ClipContent
 import com.copyyt.android.sync.SyncException
 import com.copyyt.android.sync.SyncPlatform
 import com.copyyt.android.sync.SyncState
@@ -192,9 +197,14 @@ private class FakeBackend(private val root: DeviceKeys) : BackendApi {
 
     val profileNames = mutableListOf<String>()
 
+    /** Null mimics a backend without plans. */
+    var plan: PlanDto? = null
+
+    override fun getPlan(token: String): PlanDto? = plan
+
     override fun updateProfile(token: String, name: String): UserDto {
         profileNames += name
-        return UserDto(USER_ID, "me@example.com", name)
+        return UserDto(signedInUser, if (signedInUser == USER_ID) "me@example.com" else "other@example.com", name)
     }
 
     override fun deleteAccount(token: String, code: Int) {
@@ -217,11 +227,15 @@ private class FakeSocket : SocketConnection {
 
 private class FakePlatform : SyncPlatform {
     val clipboard = mutableListOf<String>()
+    val clips = mutableListOf<ClipContent>()
     override val deviceName = "Android · Test Pixel"
     override val appVersion = "0.1.0"
     override fun now(): Instant = Instant.now()
-    override fun writeClipboard(text: String) { clipboard += text }
-    override fun notifyReceived(sourceName: String, charCount: Int) = Unit
+    override fun writeClipboard(content: ClipContent) {
+        clips += content
+        content.text?.let { clipboard += it }
+    }
+    override fun notifyReceived(sourceName: String, content: ClipContent) = Unit
 }
 
 private fun jwt(): String {
@@ -283,9 +297,16 @@ class SyncEngineTest {
         listener!!.onReady()
     }
 
-    private fun itemFromChrome(text: String, expiresAt: Instant = Instant.now().plusSeconds(60)): ClipboardItemDto {
+    private fun itemFromChrome(text: String, expiresAt: Instant = Instant.now().plusSeconds(60)): ClipboardItemDto =
+        itemFromChrome(text.toByteArray(), "text/plain", expiresAt)
+
+    private fun itemFromChrome(
+        bytes: ByteArray,
+        contentType: String,
+        expiresAt: Instant = Instant.now().plusSeconds(60),
+    ): ClipboardItemDto {
         val env = CopyytCrypto.encryptText(
-            USER_ID, CHROME_ID, 1, chromeKeys, text.toByteArray(), "text/plain",
+            USER_ID, CHROME_ID, 1, chromeKeys, bytes, contentType,
             Protocol.canonicalExpiry(expiresAt), listOf(androidPeer()),
         )
         return ClipboardItemDto(
@@ -363,7 +384,7 @@ class SyncEngineTest {
         val message = Protocol.deviceManagementMessage(
             "update", USER_ID, identity.deviceId, 1, identity.deviceId, 1,
             second.managementTimestamp!!, second.managementNonce!!, second.name, "android",
-            listOf("clipboard"), "0.1.0", null,
+            SyncEngine.CAPABILITIES, "0.1.0", null,
         )
         assertTrue(
             CopyytCrypto.verify(identity.keys.signingPublicKey, message, B64.decode(second.managementSignature!!)),
@@ -423,6 +444,95 @@ class SyncEngineTest {
             ),
         )
         assertEquals(listOf("from desktop"), platform.clipboard)
+    }
+
+    private val png = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3)
+
+    /** Makes the paired Chrome root advertise image and rich-text support. */
+    private suspend fun chromeReceivesImages(engine: SyncEngine) {
+        backend.devices[CHROME_ID] = backend.devices[CHROME_ID]!!.copy(
+            capabilities = listOf("clipboard", "clipboard-bundle-v1", "clipboard-html-v1", "clipboard-image-png-assisted-write-v1"),
+        )
+        engine.refresh()
+        listener!!.onReady()
+    }
+
+    private fun decryptPublished(index: Int = 0): Pair<String, ByteArray> {
+        val dto = CopyytJson.decodeFromJsonElement(ClipboardItemDto.serializer(), socket!!.published[index])
+        val plaintext = CopyytCrypto.decrypt(
+            USER_ID, CHROME_ID, 1, chromeKeys, androidPeer(),
+            Envelope(
+                dto.itemId, dto.sourceDeviceId, dto.sourceKeyVersion, dto.sourceSignature, dto.protocolVersion,
+                dto.contentType, dto.ciphertext, dto.nonce,
+                dto.recipients.map { EnvelopeRecipient(it.deviceId, it.deviceKeyVersion, it.wrapNonce, it.wrappedContentKey) },
+                dto.expiresAt,
+            ),
+        )
+        return dto.contentType to plaintext
+    }
+
+    @Test
+    fun anImageFromChromeLandsOnTheClipboard() = runTest {
+        val engine = engine(backgroundScope)
+        pairedAndConnected(engine)
+        val bundle = ClipboardBundle.encode(ClipContent(text = "caption", html = "<b>caption</b>", png = png))
+        engine.receive(itemFromChrome(bundle, ClipboardBundle.MIME))
+
+        val clip = platform.clips.single()
+        assertTrue(clip.png!!.contentEquals(png))
+        assertEquals("caption", clip.text)
+        assertEquals("<b>caption</b>", clip.html)
+    }
+
+    @Test
+    fun aMalformedBundleIsIgnored() = runTest {
+        val engine = engine(backgroundScope)
+        pairedAndConnected(engine)
+        val bad = """{"version":1,"representations":[{"mime":"text/html","encoding":"utf-8","data":"x"}]}"""
+        engine.receive(itemFromChrome(bad.toByteArray(), ClipboardBundle.MIME))
+        assertTrue(platform.clips.isEmpty())
+    }
+
+    @Test
+    fun anImageIsSentAsABundleToImageCapableDevices() = runTest {
+        val engine = engine(backgroundScope)
+        pairedAndConnected(engine)
+        chromeReceivesImages(engine)
+
+        assertEquals(1, engine.sendClip(ClipContent(png = png)))
+        val (contentType, plaintext) = decryptPublished()
+        assertEquals(ClipboardBundle.MIME, contentType)
+        assertTrue(ClipboardBundle.decode(plaintext).png!!.contentEquals(png))
+    }
+
+    @Test
+    fun textOnlyDevicesGetPlainTextAndImageOnlyClipsSkipThem() = runTest {
+        val engine = engine(backgroundScope)
+        pairedAndConnected(engine)
+        // The paired Chrome root still advertises only plain text.
+        engine.sendClip(ClipContent(text = "caption", html = "<b>caption</b>", png = png))
+        val (contentType, plaintext) = decryptPublished()
+        assertEquals("text/plain", contentType)
+        assertEquals("caption", plaintext.toString(Charsets.UTF_8))
+
+        val failure = runCatching { engine.sendClip(ClipContent(png = png)) }.exceptionOrNull()
+        assertTrue(failure is SyncException)
+    }
+
+    @Test
+    fun theFreePlanDropsImagesButKeepsTheirText() = runTest {
+        val engine = engine(backgroundScope)
+        pairedAndConnected(engine)
+        chromeReceivesImages(engine)
+        backend.plan = PlanDto("free", PlanLimitsDto(images = false, directTransfer = false, maxDevices = 2))
+
+        engine.sendClip(ClipContent(text = "caption", png = png))
+        val (_, plaintext) = decryptPublished()
+        assertEquals("caption", plaintext.toString(Charsets.UTF_8))
+
+        val failure = runCatching { engine.sendClip(ClipContent(png = png)) }.exceptionOrNull()
+        assertTrue(failure is SyncException && failure.message!!.contains("Pro"))
+        assertEquals(1, socket!!.published.size)
     }
 
     @Test
@@ -695,6 +805,19 @@ class SyncEngineTest {
         assertTrue(engine.state.value is SyncState.Ready)
         assertEquals(pairedId, androidId())
         assertEquals(1, backend.registrations.map { it.deviceId }.distinct().size)
+    }
+
+    @Test
+    fun theSignedInAccountIsShownAndClearedOnSignOut() = runTest {
+        val engine = engine(backgroundScope)
+        assertEquals("me@example.com", engine.account.value?.email)
+
+        engine.signOut()
+        assertEquals(null, engine.account.value)
+        engine.signInWithGoogle(OTHER_ACCOUNT_TOKEN)
+        assertEquals("other@example.com", engine.account.value?.email)
+        engine.updateName("Ada")
+        assertEquals(AccountInfo("other@example.com", "Ada"), engine.account.value)
     }
 
     @Test

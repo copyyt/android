@@ -63,6 +63,9 @@ data class PendingApproval(val deviceId: String, val name: String, val platform:
 
 data class RecoveryStatus(val exportable: Boolean, val exported: Boolean)
 
+/** Who is signed in, for display. */
+data class AccountInfo(val email: String, val name: String?)
+
 sealed interface SyncState {
     data object SignedOut : SyncState
     data object Starting : SyncState
@@ -95,8 +98,8 @@ interface SyncPlatform {
     val deviceName: String
     val appVersion: String
     fun now(): Instant
-    fun writeClipboard(text: String)
-    fun notifyReceived(sourceName: String, charCount: Int)
+    fun writeClipboard(content: ClipContent)
+    fun notifyReceived(sourceName: String, content: ClipContent)
 }
 
 /** One live, authenticated Socket.IO session. */
@@ -146,6 +149,9 @@ class SyncEngine(
     private val _needsName = MutableStateFlow(sessions.get()?.let { it.name.isNullOrBlank() } ?: false)
     val needsName: StateFlow<Boolean> = _needsName.asStateFlow()
 
+    private val _account = MutableStateFlow(sessions.get()?.let { AccountInfo(it.email, it.name) })
+    val account: StateFlow<AccountInfo?> = _account.asStateFlow()
+
     init {
         sessions.get()?.let { trust.useAccount(it.userId) }
     }
@@ -187,6 +193,7 @@ class SyncEngine(
         val session = sessions.get() ?: return
         if (session.userId != user.id) return
         sessions.set(session.copy(name = user.name ?: trimmed))
+        _account.value = AccountInfo(session.email, user.name ?: trimmed)
         _needsName.value = false
     }
 
@@ -197,6 +204,7 @@ class SyncEngine(
             Session(response.accessToken, refreshToken, response.user.id, response.user.email, response.user.name),
         )
         trust.useAccount(response.user.id)
+        _account.value = AccountInfo(response.user.email, response.user.name)
         _needsName.value = response.user.name.isNullOrBlank()
     }
 
@@ -211,6 +219,7 @@ class SyncEngine(
         if (wasRevoked) discardDeviceState()
         sessions.clear()
         _needsName.value = false
+        _account.value = null
         _state.value = SyncState.SignedOut
         if (session != null) {
             scope.launch { runCatching { api.logout(session.refreshToken) } }
@@ -252,6 +261,7 @@ class SyncEngine(
             if (error.status == 400 || error.status == 401) {
                 sessions.clear()
                 closeSocket()
+                _account.value = null
                 _state.value = SyncState.SignedOut
             }
             throw error
@@ -686,6 +696,7 @@ class SyncEngine(
         refreshLock.withLock { discardDeviceState() }
         sessions.clear()
         _needsName.value = false
+        _account.value = null
         _state.value = SyncState.SignedOut
     }
 
@@ -844,7 +855,7 @@ class SyncEngine(
             source = trust.get(item.sourceDeviceId)
             if (source?.locallyVerified != true) return
         }
-        if (item.contentType != TEXT_PLAIN) {
+        if (item.contentType != TEXT_PLAIN && item.contentType != ClipboardBundle.MIME) {
             processed.mark(item.itemId)
             return
         }
@@ -855,18 +866,34 @@ class SyncEngine(
             return
         }
         processed.mark(item.itemId)
-        val text = plaintext.toString(Charsets.UTF_8)
-        platform.writeClipboard(text)
+        val content = if (item.contentType == TEXT_PLAIN) {
+            ClipContent(text = plaintext.toString(Charsets.UTF_8))
+        } else {
+            try {
+                ClipboardBundle.decode(plaintext)
+            } catch (_: ClipboardBundleException) {
+                return
+            }
+        }
+        platform.writeClipboard(content)
         val sourceName = source.name ?: "another device"
-        platform.notifyReceived(sourceName, text.length)
+        platform.notifyReceived(sourceName, content)
         if (_state.value is SyncState.Ready) publishReady("Received from $sourceName")
     }
 
     // ---- Send ----------------------------------------------------------
 
     /** Encrypts [text] for every locally verified, text-capable peer and publishes it. */
-    suspend fun sendText(text: String): Int {
-        if (text.isEmpty()) throw SyncException("There is no text to send")
+    suspend fun sendText(text: String): Int = sendClip(ClipContent(text = text))
+
+    /**
+     * Sends text, formatted text and/or an image. Each peer gets the richest
+     * form it supports (plain text for text-only peers). Images are part of
+     * Copyyt Pro; on Free, text sent with an image still goes. Returns the
+     * number of devices it was sent to.
+     */
+    suspend fun sendClip(input: ClipContent): Int {
+        if (input.isEmpty) throw SyncException("There is nothing to send")
         val session = sessions.get() ?: throw SyncException("Sign in to Copyyt first")
         if (!socketReady) {
             start()
@@ -883,18 +910,66 @@ class SyncEngine(
         serverTrustedIds = trusted.map { it.deviceId }.toSet()
         for (device in trusted) trust.upsertServerReported(session.userId, device)
         reconcileApprovals(session.userId, trusted)
-        val recipients = trust.all()
+        val peers = trust.all()
             .filter {
                 it.locallyVerified && it.deviceId != identity.deviceId &&
                     it.deviceId in serverTrustedIds && CLIPBOARD_CAPABILITY in it.capabilities
             }
-            .map { it.toPeer() }
-        if (recipients.isEmpty()) throw SyncException("No paired device can receive text yet")
-        val envelope = CopyytCrypto.encryptText(
-            session.userId, identity.deviceId, keyVersion, identity.keys,
-            text.toByteArray(Charsets.UTF_8), TEXT_PLAIN,
-            Protocol.canonicalExpiry(platform.now().plus(LIVE_TTL)), recipients,
-        )
+        if (peers.isEmpty()) throw SyncException("No paired device can receive it yet")
+
+        var content = input
+        if (content.png != null && runCatching { authed { api.getPlan(it) } }.getOrNull()?.limits?.images == false) {
+            if (content.text.isNullOrEmpty()) throw SyncException("Copying images between devices is part of Copyyt Pro")
+            content = content.withoutImage()
+        }
+
+        // One encrypted item per distinct form, like the extension's projections.
+        val groups = linkedMapOf<Pair<String, List<String>>, Pair<ByteArray, MutableList<LocalDevice>>>()
+        for (peer in peers) {
+            val projected = projectFor(content, peer) ?: continue
+            val (contentType, bytes) = wireForm(projected) ?: continue
+            val key = contentType to listOfNotNull(projected.text, projected.html, projected.png?.let(B64::encode))
+            groups.getOrPut(key) { bytes to mutableListOf() }.second += peer
+        }
+        if (groups.isEmpty()) throw SyncException("None of your paired devices can receive this yet")
+
+        val expiry = Protocol.canonicalExpiry(platform.now().plus(LIVE_TTL))
+        var delivered = 0
+        for ((key, group) in groups) {
+            val (bytes, recipients) = group
+            val envelope = CopyytCrypto.encryptText(
+                session.userId, identity.deviceId, keyVersion, identity.keys,
+                bytes, key.first, expiry, recipients.map { it.toPeer() },
+            )
+            publish(envelope)
+            delivered += recipients.size
+        }
+        publishReady("Sent to $delivered device(s)")
+        return delivered
+    }
+
+    /** The richest form of [content] that [peer] advertises support for. */
+    private fun projectFor(content: ClipContent, peer: LocalDevice): ClipContent? {
+        val bundle = BUNDLE_CAPABILITY in peer.capabilities
+        val html = content.html?.takeIf { bundle && HTML_CAPABILITY in peer.capabilities }
+        val png = content.png?.takeIf { bundle && PNG_CAPABILITY in peer.capabilities }
+        if (content.text == null && png == null) return null
+        return ClipContent(content.text, html?.takeIf { content.text != null }, png)
+    }
+
+    /** Plain text travels as raw UTF-8; anything richer as a bundle. */
+    private fun wireForm(content: ClipContent): Pair<String, ByteArray>? {
+        if (content.html == null && content.png == null) {
+            return TEXT_PLAIN to content.text!!.toByteArray(Charsets.UTF_8)
+        }
+        val bundle = ClipboardBundle.encode(content)
+        if (bundle.size <= ClipboardBundle.MAX_BYTES) return ClipboardBundle.MIME to bundle
+        // Too large for the relay: fall back to the text, if there is any.
+        val text = content.text ?: return null
+        return wireForm(ClipContent(text = text))
+    }
+
+    private suspend fun publish(envelope: Envelope) {
         val payload = CopyytJson.encodeToJsonElement(ClipboardItemDto.serializer(), envelope.toDto()).jsonObject
         val connection = socket ?: throw SyncException("Copyyt is not connected")
         val accepted = withTimeoutOrNull(PUBLISH_TIMEOUT_MS) {
@@ -908,14 +983,16 @@ class SyncEngine(
         }
         if (accepted != true) throw SyncException("The server did not accept the clipboard item")
         processed.mark(envelope.itemId)
-        publishReady("Sent to ${recipients.size} device(s)")
-        return recipients.size
     }
 
     companion object {
         const val CLIPBOARD_CAPABILITY = "clipboard"
+        const val BUNDLE_CAPABILITY = "clipboard-bundle-v1"
+        const val HTML_CAPABILITY = "clipboard-html-v1"
+        /** The extension's name for "can receive PNG bundles". */
+        const val PNG_CAPABILITY = "clipboard-image-png-assisted-write-v1"
         const val PLATFORM = "android"
-        val CAPABILITIES = listOf(CLIPBOARD_CAPABILITY)
+        val CAPABILITIES = listOf(CLIPBOARD_CAPABILITY, BUNDLE_CAPABILITY, HTML_CAPABILITY, PNG_CAPABILITY)
         const val TEXT_PLAIN = "text/plain"
         val LIVE_TTL: Duration = Duration.ofSeconds(60)
         val MAX_CLOCK_SKEW: Duration = Duration.ofMinutes(5)

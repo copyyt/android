@@ -41,6 +41,7 @@ class MainActivity : ComponentActivity() {
         val engine = CopyytApp.engine(this)
         val actions = ScreenActions(
             readClipboard = ::readClipboard,
+            prepareClip = ::prepareClip,
             googleSignInAvailable = BuildConfig.GOOGLE_SERVER_CLIENT_ID.isNotBlank(),
             googleIdToken = ::googleIdToken,
             copySensitive = ::copySensitive,
@@ -74,12 +75,11 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Reading is only allowed while this activity has focus (Android 10+). */
-    private fun readClipboard(): String? =
-        getSystemService(ClipboardManager::class.java).primaryClip
-            ?.takeIf { it.itemCount > 0 }
-            ?.getItemAt(0)
-            ?.coerceToText(this)
-            ?.toString()
+    private fun readClipboard(): ClipboardRead? = ClipImages.readClipboard(this)
+
+    /** Shrinks images to fit the relay; runs off the main thread. */
+    private suspend fun prepareClip(read: ClipboardRead): PreparedClip =
+        withContext(Dispatchers.IO) { read.prepare(contentResolver) }
 
     /** Copies secret text, flagged so Android 13+ hides it from the clipboard preview. */
     private fun copySensitive(label: String, text: String) {
