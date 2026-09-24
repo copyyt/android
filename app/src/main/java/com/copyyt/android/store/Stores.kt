@@ -82,22 +82,38 @@ class DeviceIdentity(
     val recoveryExportedAt: String? = null,
 )
 
-/** One device identity per account, like the extension's per-user key store. */
-class IdentityStore(storage: SecureStorage) {
-    private val blob = JsonBlob(storage, "identity", StoredIdentity.serializer())
+/**
+ * One device identity per account, like the extension's per-user key store.
+ * Each account has its own blob, so signing in to another account never
+ * replaces this one's keys.
+ */
+class IdentityStore(private val storage: SecureStorage) {
+    private fun blob(userId: String) = JsonBlob(storage, "identity-$userId", StoredIdentity.serializer())
 
-    fun get(userId: String): DeviceIdentity? = blob.load()
-        ?.takeIf { it.userId == userId }
-        ?.let {
-            DeviceIdentity(
-                it.userId, it.deviceId,
-                DeviceKeys(B64.decode(it.signingSeed), B64.decode(it.encryptionPrivateKey)),
-                it.keyVersion,
-                it.recoveryPublicKey,
-                it.recoverySeed?.let(B64::decode),
-                it.recoveryExportedAt,
-            )
-        }
+    /** Moves an identity saved by versions that kept a single account. */
+    private fun migrateLegacy(userId: String) {
+        val legacy = JsonBlob(storage, LEGACY_BLOB, StoredIdentity.serializer())
+        val stored = legacy.load() ?: return
+        val target = blob(stored.userId)
+        if (target.load() == null) target.save(stored)
+        legacy.clear()
+    }
+
+    private fun load(userId: String): StoredIdentity? {
+        migrateLegacy(userId)
+        return blob(userId).load()?.takeIf { it.userId == userId }
+    }
+
+    fun get(userId: String): DeviceIdentity? = load(userId)?.let {
+        DeviceIdentity(
+            it.userId, it.deviceId,
+            DeviceKeys(B64.decode(it.signingSeed), B64.decode(it.encryptionPrivateKey)),
+            it.keyVersion,
+            it.recoveryPublicKey,
+            it.recoverySeed?.let(B64::decode),
+            it.recoveryExportedAt,
+        )
+    }
 
     fun getOrCreate(userId: String): DeviceIdentity = get(userId) ?: run {
         val keys = DeviceKeys.generate()
@@ -107,16 +123,19 @@ class IdentityStore(storage: SecureStorage) {
             signingSeed = B64.encode(keys.signingSeed),
             encryptionPrivateKey = B64.encode(keys.encryptionPrivateKey),
         )
-        blob.save(created)
+        blob(userId).save(created)
         get(userId)!!
     }
 
-    fun setKeyVersion(identity: DeviceIdentity, keyVersion: Int): DeviceIdentity {
-        val current = blob.load() ?: error("No device identity")
+    private fun update(identity: DeviceIdentity, change: (StoredIdentity) -> StoredIdentity): DeviceIdentity {
+        val current = load(identity.userId) ?: error("No device identity")
         require(current.deviceId == identity.deviceId) { "Device identity changed" }
-        blob.save(current.copy(keyVersion = keyVersion))
+        blob(identity.userId).save(change(current))
         return get(identity.userId)!!
     }
+
+    fun setKeyVersion(identity: DeviceIdentity, keyVersion: Int): DeviceIdentity =
+        update(identity) { it.copy(keyVersion = keyVersion) }
 
     /** Creates the offline recovery key pair if this identity has none yet. */
     fun ensureRecoveryKey(identity: DeviceIdentity): DeviceIdentity =
@@ -125,28 +144,29 @@ class IdentityStore(storage: SecureStorage) {
 
     /** Installs a (new or rotated) recovery key; it is exportable again. */
     fun setRecoveryKey(identity: DeviceIdentity, seed: ByteArray): DeviceIdentity {
-        val current = blob.load() ?: error("No device identity")
-        require(current.deviceId == identity.deviceId) { "Device identity changed" }
         val publicKey = com.google.crypto.tink.subtle.Ed25519Sign.KeyPair.newKeyPairFromSeed(seed).publicKey
-        blob.save(
-            current.copy(
+        return update(identity) {
+            it.copy(
                 recoveryPublicKey = B64.encode(publicKey),
                 recoverySeed = B64.encode(seed),
                 recoveryExportedAt = null,
-            ),
-        )
-        return get(identity.userId)!!
+            )
+        }
     }
 
     /** Deletes the recovery private key once the user saved it offline. */
-    fun sealRecovery(identity: DeviceIdentity, exportedAt: String): DeviceIdentity {
-        val current = blob.load() ?: error("No device identity")
-        require(current.deviceId == identity.deviceId) { "Device identity changed" }
-        blob.save(current.copy(recoverySeed = null, recoveryExportedAt = exportedAt))
-        return get(identity.userId)!!
+    fun sealRecovery(identity: DeviceIdentity, exportedAt: String): DeviceIdentity =
+        update(identity) { it.copy(recoverySeed = null, recoveryExportedAt = exportedAt) }
+
+    /** Forgets this account's identity only; other accounts keep theirs. */
+    fun clear(userId: String) {
+        migrateLegacy(userId)
+        blob(userId).clear()
     }
 
-    fun clear() = blob.clear()
+    private companion object {
+        const val LEGACY_BLOB = "identity"
+    }
 }
 
 /** Bounded record of handled item IDs so replays are never re-applied. */

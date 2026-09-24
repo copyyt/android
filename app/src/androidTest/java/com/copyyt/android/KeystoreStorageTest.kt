@@ -45,6 +45,6 @@ class KeystoreStorageTest {
         val reloaded = IdentityStore(KeystoreStorage(context)).get("user-1")!!
         assertEquals(first.deviceId, reloaded.deviceId)
         assertEquals(first.keys.signingPublicKeyBase64, reloaded.keys.signingPublicKeyBase64)
-        IdentityStore(KeystoreStorage(context)).clear()
+        IdentityStore(KeystoreStorage(context)).clear("user-1")
     }
 }

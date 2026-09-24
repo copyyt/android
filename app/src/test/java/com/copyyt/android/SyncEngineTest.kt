@@ -46,6 +46,8 @@ import java.time.Instant
 import java.util.Base64
 
 private const val USER_ID = "507f1f77bcf86cd799439011"
+private const val OTHER_USER_ID = "other-user"
+private const val OTHER_ACCOUNT_TOKEN = "other-account"
 private const val CHROME_ID = "00000000-0000-4000-8000-000000000001"
 private const val OTHER_ID = "00000000-0000-4000-8000-000000000003"
 
@@ -60,6 +62,8 @@ private class FakeBackend(private val root: DeviceKeys) : BackendApi {
     /** Public key of the account's offline recovery credential, if any. */
     var anchorRecoveryKey: String? = null
     val chromeRecoverySeed: ByteArray = Ed25519Sign.KeyPair.newKeyPair().privateKey
+    /** The account the fake is serving; the other account has no devices. */
+    var signedInUser = USER_ID
 
     fun addRoot() {
         devices[CHROME_ID] = device(CHROME_ID, "Chrome on laptop", "chrome", root, "trusted", listOf("clipboard"))
@@ -90,7 +94,7 @@ private class FakeBackend(private val root: DeviceKeys) : BackendApi {
     override fun signInPasswordless(email: String) = Unit
     override fun verifyEmail(email: String, code: Int, name: String?) = error("unused")
     override fun refreshTokens(refreshToken: String): SignInResponse =
-        SignInResponse(jwt(), "refresh-2", UserDto(USER_ID, "me@example.com"))
+        SignInResponse(jwt(), "refresh-2", UserDto(signedInUser, "me@example.com"))
     override fun logout(refreshToken: String) = Unit
 
     override fun registerDevice(token: String, request: RegisterDeviceRequest): DeviceDto {
@@ -111,11 +115,16 @@ private class FakeBackend(private val root: DeviceKeys) : BackendApi {
         ).also { devices[it.deviceId] = it }.copy(recoveryKeyActive = firstDevice)
     }
 
-    override fun listTrusted(token: String) = devices.values.filter { it.trustState == "trusted" }
-    override fun listPending(token: String) = devices.values.filter { it.trustState == "pending" }
+    override fun listTrusted(token: String) =
+        if (signedInUser != USER_ID) emptyList() else devices.values.filter { it.trustState == "trusted" }
+    override fun listPending(token: String) =
+        if (signedInUser != USER_ID) emptyList() else devices.values.filter { it.trustState == "pending" }
     override fun latestItem(token: String, deviceId: String) = latest
-    override fun googleSignIn(idToken: String) =
-        SignInResponse(jwt(), "refresh-google", UserDto(USER_ID, "me@example.com"))
+    override fun googleSignIn(idToken: String): SignInResponse {
+        signedInUser = if (idToken == OTHER_ACCOUNT_TOKEN) OTHER_USER_ID else USER_ID
+        val email = if (signedInUser == USER_ID) "me@example.com" else "other@example.com"
+        return SignInResponse(jwt(), "refresh-google", UserDto(signedInUser, email))
+    }
 
     override fun approveDevice(token: String, request: ApproveDeviceRequest): DeviceDto {
         val approver = devices[request.approvingDeviceId]!!
@@ -669,6 +678,23 @@ class SyncEngineTest {
         val failure = runCatching { engine.updateName("   ") }.exceptionOrNull()
         assertTrue(failure is SyncException)
         assertTrue(backend.profileNames.isEmpty())
+    }
+
+    @Test
+    fun signingIntoAnotherAccountKeepsThisAccountPaired() = runTest {
+        val engine = engine(backgroundScope)
+        pairedAndConnected(engine)
+        val pairedId = androidId()
+
+        engine.signOut()
+        engine.signInWithGoogle(OTHER_ACCOUNT_TOKEN)
+        assertEquals(SyncState.NoRoot(canBeFirstDevice = true), engine.state.value)
+        engine.signOut()
+        engine.signInWithGoogle("google-id-token")
+
+        assertTrue(engine.state.value is SyncState.Ready)
+        assertEquals(pairedId, androidId())
+        assertEquals(1, backend.registrations.map { it.deviceId }.distinct().size)
     }
 
     @Test

@@ -57,19 +57,49 @@ class TrustException(message: String) : Exception(message)
  */
 class TrustStore(private val storage: SecureStorage) {
     private val serializer = ListSerializer(LocalDevice.serializer())
-    private val devices: MutableMap<String, LocalDevice> = load()
 
-    private fun load(): MutableMap<String, LocalDevice> =
-        storage.read(BLOB)
+    /**
+     * Trust is kept per account: each account has its own blob and only the
+     * signed-in account's devices are loaded, so another account's devices
+     * can never be treated as recipients or roots.
+     */
+    private var account: String? = null
+    private var devices: MutableMap<String, LocalDevice> = mutableMapOf()
+
+    private fun blobFor(userId: String) = "$BLOB-$userId"
+
+    private fun read(name: String): List<LocalDevice>? =
+        storage.read(name)
             ?.let { runCatching { CopyytJson.decodeFromString(serializer, it.toString(Charsets.UTF_8)) }.getOrNull() }
-            .orEmpty()
+
+    private fun write(name: String, list: List<LocalDevice>) =
+        storage.write(name, CopyytJson.encodeToString(serializer, list).toByteArray(Charsets.UTF_8))
+
+    /** Splits the single-account blob written by earlier versions. */
+    private fun migrateLegacy() {
+        val legacy = read(BLOB) ?: return
+        for ((userId, records) in legacy.groupBy { it.userId }) {
+            if (read(blobFor(userId)) == null) write(blobFor(userId), records)
+        }
+        storage.delete(BLOB)
+    }
+
+    /** Switches to the signed-in account's trust records. */
+    @Synchronized
+    fun useAccount(userId: String) {
+        if (account == userId) return
+        migrateLegacy()
+        account = userId
+        devices = read(blobFor(userId)).orEmpty()
+            .filter { it.userId == userId }
             .associateBy { it.deviceId }
             .toMutableMap()
+    }
 
-    private fun persist() = storage.write(
-        BLOB,
-        CopyytJson.encodeToString(serializer, devices.values.toList()).toByteArray(Charsets.UTF_8),
-    )
+    private fun persist() {
+        val userId = account ?: return
+        write(blobFor(userId), devices.values.toList())
+    }
 
     @Synchronized
     fun get(deviceId: String): LocalDevice? = devices[deviceId]
@@ -79,6 +109,7 @@ class TrustStore(private val storage: SecureStorage) {
 
     @Synchronized
     fun upsertServerReported(userId: String, device: DeviceDto): LocalDevice {
+        useAccount(userId)
         val incoming = LocalDevice(
             userId = userId,
             deviceId = device.deviceId,
@@ -187,10 +218,11 @@ class TrustStore(private val storage: SecureStorage) {
         trust = LocalTrust.REVOKED, origin = null, pairedForDeviceId = null, pairingFingerprint = null,
     )
 
+    /** Forgets the signed-in account's trust only; other accounts keep theirs. */
     @Synchronized
     fun clear() {
         devices.clear()
-        storage.delete(BLOB)
+        account?.let { storage.delete(blobFor(it)) }
     }
 
     private companion object {

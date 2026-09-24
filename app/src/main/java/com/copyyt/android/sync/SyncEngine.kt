@@ -146,6 +146,10 @@ class SyncEngine(
     private val _needsName = MutableStateFlow(sessions.get()?.let { it.name.isNullOrBlank() } ?: false)
     val needsName: StateFlow<Boolean> = _needsName.asStateFlow()
 
+    init {
+        sessions.get()?.let { trust.useAccount(it.userId) }
+    }
+
     private val refreshLock = Mutex()
     private val tokenLock = Mutex()
     // Touched from Socket.IO callback threads as well as coroutines.
@@ -192,6 +196,7 @@ class SyncEngine(
         sessions.set(
             Session(response.accessToken, refreshToken, response.user.id, response.user.email, response.user.name),
         )
+        trust.useAccount(response.user.id)
         _needsName.value = response.user.name.isNullOrBlank()
     }
 
@@ -200,19 +205,23 @@ class SyncEngine(
         val wasRevoked = _state.value == SyncState.Revoked
         closeSocket()
         pollJob?.cancel()
+        // A revoked identity can never sync again; signing back in must start
+        // over with a new identity rather than hit the same dead end. Other
+        // accounts on this phone keep their identities and trust.
+        if (wasRevoked) discardDeviceState()
         sessions.clear()
         _needsName.value = false
-        // A revoked identity can never sync again; signing back in must start
-        // over with a new identity rather than hit the same dead end.
-        if (wasRevoked) discardDeviceState()
         _state.value = SyncState.SignedOut
         if (session != null) {
             scope.launch { runCatching { api.logout(session.refreshToken) } }
         }
     }
 
+    /** Forgets this phone's identity and trust for the signed-in account only. */
     private fun discardDeviceState() {
-        identities.clear()
+        val userId = sessions.get()?.userId ?: return
+        trust.useAccount(userId)
+        identities.clear(userId)
         trust.clear()
         processed.clear()
     }
@@ -298,6 +307,7 @@ class SyncEngine(
     }
 
     private suspend fun refreshLocked(session: Session) {
+        trust.useAccount(session.userId)
         if (identities.get(session.userId) == null) trust.clear()
         var identity = identities.getOrCreate(session.userId)
         var trusted = authed { api.listTrusted(it) }
