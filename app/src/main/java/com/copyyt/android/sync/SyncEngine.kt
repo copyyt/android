@@ -23,6 +23,8 @@ import com.copyyt.android.store.IdentityStore
 import com.copyyt.android.store.ProcessedItems
 import com.copyyt.android.store.Session
 import com.copyyt.android.store.SessionStore
+import com.copyyt.android.store.PreferencesStore
+import com.copyyt.android.store.InMemoryStorage
 import com.copyyt.android.trust.LocalDevice
 import com.copyyt.android.trust.LocalTrust
 import com.copyyt.android.trust.TrustStore
@@ -135,6 +137,7 @@ class SyncEngine(
     private val processed: ProcessedItems,
     private val platform: SyncPlatform,
     private val scope: CoroutineScope,
+    private val preferences: PreferencesStore = PreferencesStore(InMemoryStorage()),
 ) {
     private val _state = MutableStateFlow<SyncState>(
         if (sessions.get() == null) SyncState.SignedOut else SyncState.Starting,
@@ -152,8 +155,27 @@ class SyncEngine(
     private val _account = MutableStateFlow(sessions.get()?.let { AccountInfo(it.email, it.name) })
     val account: StateFlow<AccountInfo?> = _account.asStateFlow()
 
+    /**
+     * Receive puts copies from other devices on this phone's clipboard. Paused
+     * drops the background connection; sending still works on demand.
+     */
+    private val _receiveEnabled = MutableStateFlow(preferences.get().receiveEnabled)
+    val receiveEnabled: StateFlow<Boolean> = _receiveEnabled.asStateFlow()
+
     init {
         sessions.get()?.let { trust.useAccount(it.userId) }
+    }
+
+    fun setReceiveEnabled(enabled: Boolean) {
+        if (_receiveEnabled.value == enabled) return
+        preferences.set(preferences.get().copy(receiveEnabled = enabled))
+        _receiveEnabled.value = enabled
+        if (enabled) {
+            start()
+        } else {
+            closeSocket()
+            if (_state.value is SyncState.Ready) publishReady()
+        }
     }
 
     private val refreshLock = Mutex()
@@ -345,7 +367,7 @@ class SyncEngine(
                 pollJob?.cancel()
                 rootMissing = root == null
                 publishReady()
-                connectSocket()
+                if (_receiveEnabled.value) connectSocket()
                 return
             }
         }
@@ -797,7 +819,7 @@ class SyncEngine(
             socketReady = true
             reconnectDelayMs = INITIAL_RECONNECT_MS
             publishReady()
-            scope.launch { fetchLatest() }
+            if (_receiveEnabled.value) scope.launch { fetchLatest() }
         }
 
         override fun onItem(json: String) {
@@ -816,7 +838,7 @@ class SyncEngine(
     }
 
     private fun scheduleReconnect(authFailed: Boolean) {
-        if (sessions.get() == null || reconnectJob?.isActive == true) return
+        if (sessions.get() == null || !_receiveEnabled.value || reconnectJob?.isActive == true) return
         reconnectJob = scope.launch {
             delay(reconnectDelayMs)
             reconnectDelayMs = minOf(reconnectDelayMs * 2, MAX_RECONNECT_MS)
@@ -836,6 +858,8 @@ class SyncEngine(
     // ---- Receive -------------------------------------------------------
 
     internal suspend fun receive(item: ClipboardItemDto) {
+        // Paused: leave items unprocessed; they expire on the relay anyway.
+        if (!_receiveEnabled.value) return
         val session = sessions.get() ?: return
         val identity = identities.get(session.userId) ?: return
         val keyVersion = identity.keyVersion ?: return
@@ -895,12 +919,32 @@ class SyncEngine(
     suspend fun sendClip(input: ClipContent): Int {
         if (input.isEmpty) throw SyncException("There is nothing to send")
         val session = sessions.get() ?: throw SyncException("Sign in to Copyyt first")
+        // While receiving is paused there is no standing connection: open one
+        // just for this send and close it again afterwards.
+        val temporary = !socketReady && !_receiveEnabled.value
         if (!socketReady) {
-            start()
+            if (temporary) {
+                if (_state.value !is SyncState.Ready) refresh()
+                if (_state.value !is SyncState.Ready) throw SyncException("Finish setting up Copyyt on this phone first")
+                connectSocket()
+            } else {
+                start()
+            }
             withTimeoutOrNull(SEND_CONNECT_TIMEOUT_MS) {
                 _state.first { it is SyncState.Ready && it.connected }
             } ?: throw SyncException("Copyyt is not connected yet")
         }
+        try {
+            return deliver(session, input)
+        } finally {
+            if (temporary && !_receiveEnabled.value) {
+                closeSocket()
+                if (_state.value is SyncState.Ready) publishReady()
+            }
+        }
+    }
+
+    private suspend fun deliver(session: Session, input: ClipContent): Int {
         val identity = identities.get(session.userId) ?: throw SyncException("This device is not set up")
         val keyVersion = identity.keyVersion ?: throw SyncException("This device is not registered")
         // Re-read membership right before encrypting: a removed device must

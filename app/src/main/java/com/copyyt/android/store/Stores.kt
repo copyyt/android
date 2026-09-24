@@ -50,6 +50,16 @@ data class Session(
     val name: String? = null,
 )
 
+/** This phone's own settings; they don't follow the account to other devices. */
+@Serializable
+data class DevicePreferences(val receiveEnabled: Boolean = true)
+
+class PreferencesStore(storage: SecureStorage) {
+    private val blob = JsonBlob(storage, "device-preferences", DevicePreferences.serializer())
+    fun get(): DevicePreferences = blob.load() ?: DevicePreferences()
+    fun set(preferences: DevicePreferences) = blob.save(preferences)
+}
+
 class SessionStore(storage: SecureStorage) {
     private val blob = JsonBlob(storage, "session", Session.serializer())
     fun get(): Session? = blob.load()

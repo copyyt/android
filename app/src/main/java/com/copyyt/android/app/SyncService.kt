@@ -18,6 +18,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
@@ -43,11 +44,13 @@ class SyncService : Service() {
         engine.start()
         watchJob?.cancel()
         watchJob = scope.launch {
-            engine.state.collectLatest { state ->
-                when (state) {
+            combine(engine.state, engine.receiveEnabled, ::Pair).collectLatest { (state, receiving) ->
+                when {
+                    // Paused: no background connection, so no service or notification.
+                    !receiving -> stopSelf()
                     // A removed phone keeps the service so "Set up again" can
                     // resume background receiving without restarting it.
-                    SyncState.SignedOut -> stopSelf()
+                    state == SyncState.SignedOut -> stopSelf()
                     else -> update(statusText(state))
                 }
             }
@@ -91,7 +94,9 @@ class SyncService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 1
 
+        /** Starts background receiving, unless this phone has it paused. */
         fun start(context: Context) {
+            if (!CopyytApp.engine(context).receiveEnabled.value) return
             ContextCompat.startForegroundService(context, Intent(context, SyncService::class.java))
         }
     }

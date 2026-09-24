@@ -41,6 +41,7 @@ class MainActivity : ComponentActivity() {
         val engine = CopyytApp.engine(this)
         val actions = ScreenActions(
             readClipboard = ::readClipboard,
+            startReceiving = { SyncService.start(this) },
             prepareClip = ::prepareClip,
             googleSignInAvailable = BuildConfig.GOOGLE_SERVER_CLIENT_ID.isNotBlank(),
             googleIdToken = ::googleIdToken,

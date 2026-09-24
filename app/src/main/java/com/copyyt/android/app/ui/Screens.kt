@@ -58,6 +58,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -81,6 +82,7 @@ import kotlinx.coroutines.withContext
 /** Side effects the screens need from the activity. */
 class ScreenActions(
     val readClipboard: () -> ClipboardRead?,
+    val startReceiving: () -> Unit,
     val prepareClip: suspend (ClipboardRead) -> PreparedClip,
     val googleSignInAvailable: Boolean,
     val googleIdToken: suspend () -> String?,
@@ -532,19 +534,61 @@ private fun ReadyShell(engine: SyncEngine, state: SyncState.Ready, actions: Scre
 }
 
 @Composable
-private fun StatusPill(connected: Boolean) {
-    val color = if (connected) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant
+private fun ReceiveModeCard(receiving: Boolean, onChange: (Boolean) -> Unit) {
+    SectionCard {
+        Text("On this phone", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(true to "Receive", false to "Paused").forEach { (value, label) ->
+                val selected = receiving == value
+                OutlinedButton(
+                    onClick = { onChange(value) },
+                    modifier = Modifier.weight(1f).height(44.dp).semantics { this.selected = selected },
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                    ),
+                    border = BorderStroke(
+                        1.dp,
+                        if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                    ),
+                ) {
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        Hint(
+            if (receiving) "Copies from your devices land on this phone's clipboard. Sending is always a tap away."
+            else "Nothing arrives on this phone and the background connection is off. You can still send.",
+        )
+    }
+}
+
+@Composable
+private fun StatusPill(connected: Boolean, paused: Boolean = false) {
+    val color = if (connected && !paused) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         Modifier.padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (connected) {
+        if (connected && !paused) {
             MockupIcon(connectedIcon, Modifier.size(12.dp))
         } else {
             Box(Modifier.size(8.dp).clip(CircleShape).background(color))
         }
         Spacer(Modifier.width(8.dp))
-        Text(if (connected) "Connected" else "Reconnecting…", style = MaterialTheme.typography.labelMedium, color = color)
+        Text(
+            when {
+                paused -> "Paused"
+                connected -> "Connected"
+                else -> "Reconnecting…"
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = color,
+        )
     }
 }
 
@@ -564,8 +608,17 @@ private fun DeviceTransferIllustration() {
 private fun HomeTab(engine: SyncEngine, state: SyncState.Ready, actions: ScreenActions, goTo: (Tab) -> Unit) {
     var sending by remember { mutableStateOf(false) }
     val run = rememberRunner { actions.toast(it); sending = false }
-    StatusPill(state.connected)
-    Header("Copy here, paste anywhere", "Text you copy on your other devices lands on this phone's clipboard automatically.")
+    val receiving by engine.receiveEnabled.collectAsState()
+    StatusPill(state.connected, paused = !receiving)
+    Header(
+        "Copy here, paste anywhere",
+        if (receiving) "What you copy on your other devices lands on this phone's clipboard automatically."
+        else "Receiving is paused. Copies from your other devices won't reach this phone.",
+    )
+    ReceiveModeCard(receiving) { enabled ->
+        engine.setReceiveEnabled(enabled)
+        if (enabled) actions.startReceiving()
+    }
     if (state.rootMissing) {
         Banner("Your account root was removed. Existing devices keep syncing, but new ones can't pair.", "Fix") { goTo(Tab.Account) }
     }

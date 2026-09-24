@@ -14,6 +14,7 @@ import com.copyyt.android.BuildConfig
 import com.copyyt.android.R
 import com.copyyt.android.net.CopyytApi
 import com.copyyt.android.store.IdentityStore
+import com.copyyt.android.store.PreferencesStore
 import com.copyyt.android.store.ProcessedItems
 import com.copyyt.android.store.SessionStore
 import com.copyyt.android.sync.ClipContent
@@ -43,6 +44,7 @@ class CopyytApp : Application() {
             processed = ProcessedItems(storage),
             platform = AndroidPlatform(this),
             scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            preferences = PreferencesStore(storage),
         )
     }
 

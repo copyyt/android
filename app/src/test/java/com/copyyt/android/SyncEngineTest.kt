@@ -1,5 +1,8 @@
 package com.copyyt.android
 
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.async
+import com.copyyt.android.store.PreferencesStore
 import com.copyyt.android.crypto.CopyytCrypto
 import com.copyyt.android.crypto.DeviceKeys
 import com.copyyt.android.crypto.Envelope
@@ -217,7 +220,8 @@ private class FakeBackend(private val root: DeviceKeys) : BackendApi {
 private class FakeSocket : SocketConnection {
     val deviceAuth = mutableListOf<JsonObject>()
     val published = mutableListOf<JsonObject>()
-    override fun close() = Unit
+    var closed = false
+    override fun close() { closed = true }
     override fun emitDeviceAuth(payload: JsonObject) { deviceAuth += payload }
     override fun publish(payload: JsonObject, onAck: (JsonObject?) -> Unit) {
         published += payload
@@ -818,6 +822,60 @@ class SyncEngineTest {
         assertEquals("other@example.com", engine.account.value?.email)
         engine.updateName("Ada")
         assertEquals(AccountInfo("other@example.com", "Ada"), engine.account.value)
+    }
+
+    @Test
+    fun pausedReceivingIgnoresIncomingItemsAndDropsTheConnection() = runTest {
+        val engine = engine(backgroundScope)
+        pairedAndConnected(engine)
+        val standing = socket!!
+
+        engine.setReceiveEnabled(false)
+        assertTrue(standing.closed)
+        assertTrue(!(engine.state.value as SyncState.Ready).connected)
+        engine.receive(itemFromChrome("while paused"))
+        assertTrue(platform.clipboard.isEmpty())
+
+        engine.setReceiveEnabled(true)
+        engine.refresh()
+        listener!!.onReady()
+        engine.receive(itemFromChrome("after resuming"))
+        assertEquals(listOf("after resuming"), platform.clipboard)
+    }
+
+    @Test
+    fun sendingWhilePausedConnectsOnlyForTheSend() = runTest {
+        val engine = engine(backgroundScope)
+        pairedAndConnected(engine)
+        engine.setReceiveEnabled(false)
+
+        val sending = async { engine.sendText("from a paused phone") }
+        runCurrent()
+        val temporary = socket!!
+        assertTrue(!temporary.closed)
+        listener!!.onReady()
+
+        assertEquals(1, sending.await())
+        assertEquals(1, temporary.published.size)
+        assertTrue(temporary.closed)
+        assertTrue(!(engine.state.value as SyncState.Ready).connected)
+    }
+
+    @Test
+    fun thePausedChoiceIsRememberedOnThisPhone() = runTest {
+        val preferences = PreferencesStore(storage)
+        val first = SyncEngine(
+            backend, "https://socket.example", { _, _, l -> listener = l; FakeSocket().also { socket = it } },
+            SessionStore(storage), identities, TrustStore(storage), ProcessedItems(storage), platform, backgroundScope,
+            preferences,
+        )
+        first.setReceiveEnabled(false)
+        val second = SyncEngine(
+            backend, "https://socket.example", { _, _, l -> listener = l; FakeSocket().also { socket = it } },
+            SessionStore(storage), identities, TrustStore(storage), ProcessedItems(storage), platform, backgroundScope,
+            preferences,
+        )
+        assertTrue(!second.receiveEnabled.value)
     }
 
     @Test
